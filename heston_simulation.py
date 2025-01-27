@@ -64,7 +64,7 @@ mpf.plot(
     type='candle',
     addplot=apd,
     style='charles',
-    title='Gold Price: Actual vs Heston Simulation (2024-03-04 to 2025-01-24)',
+    title='GoldTRNDR: Actual vs Heston Simulation (2024-03-04 to 2025-01-24)',
     ylabel='Price',
     figratio=(12, 6)
 )
