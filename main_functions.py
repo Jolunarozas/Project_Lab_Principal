@@ -320,7 +320,7 @@ def simulate_heston_paths(params, S0, n_days, n_sims = 1, dt=1/252, seed=42):
         S[t] = np.maximum(S_new, 1e-8)
         v[t] = v_new
     
-    return S
+    return S, v
 
 
 def simulate_bates(params, S0, n_days, dt=1/252, seed=42):
@@ -408,7 +408,7 @@ def simulate_bates_paths(params, S0, n_days, n_sims = 1, dt=1/252, seed=42):
         S[t] = np.maximum(S_cont * jump_part, 1e-8)
         v[t] = v_new
     
-    return S
+    return S, v
 
 
 
@@ -692,184 +692,182 @@ def trender_bloomberg_style(df, period=14, sensitivity=1, use_close=True):
     return pd.DataFrame({
         'TrenderUp': up_line,
         'TrenderDown': down_line,
-        'Trend': trend
+        'Trend': trend,
+        'ATR': ema_tr
     }, index=df.index)
 
 
 
 def backtest_trender_strategy(df, initial_capital=100000.0, mode='long_only', 
                               annual_factor=252):
-    """
-    df must have columns: 'Close', 'TrenderDown', 'TrenderUp'.
-    Strategy:
-      - 'long_only':
-          * Enter/hold a long position if Close > TrenderDown
-          * Exit to cash if Close < TrenderUp
-      - 'long_short':
-          * Long if Close > TrenderDown
-          * Short if Close < TrenderUp (0 or negative position)
-    
-    Returns a dictionary of performance metrics:
-      - annual_vol, mean_return, max_drawdown, max_drawdown_duration,
-        num_trades, win_ratio, sharpe_ratio, etc.
-    """
-    # We'll track a position in units of "shares" or "notional"? 
-    # For simplicity, let's do notional approach:
-    # position = 1 => fully invested long with all capital
-    # position = -1 => fully short with all capital
-    # position = 0 => no position.
-    
+    import numpy as np
+    import pandas as pd
+
     closes = df['Close'].values
     trender_down = df['TrenderDown'].values
     trender_up = df['TrenderUp'].values
     n = len(df)
-    
-    position = 0  # start flat
+
+    signal_up = np.empty_like(trender_up)
+    signal_down = np.empty_like(trender_down)
+    signal_up[0] = np.nan
+    signal_down[0] = np.nan
+    signal_up[1:] = trender_up[:-1]
+    signal_down[1:] = trender_down[:-1]
+
+    position = 0
+    positions = np.zeros(n, dtype=int)
+
     capital = initial_capital
     equity_curve = np.zeros(n)
-    
-    # For performance metrics
+
+
     trades = []
-    last_trade_price = None
-    last_position = 0
-    
-    for i in range(n):
+
+    equity_curve[0] = capital
+    positions[0] = position
+
+    for i in range(1, n):
         price = closes[i]
-        if i == 0:
-            equity_curve[i] = capital
-            continue
-        
-        # Check signals
+
         if mode == 'long_only':
-            if position <= 0:
-                # Check if we should go long
-                if price > trender_down[i]:
-                    # open a long
-                    position = 1
-                    last_trade_price = price
-                    trades.append({'side':'buy','price':price})
-            else:
-                # we are long, check exit
-                if price < trender_up[i]:
-                    # close long
-                    position = 0
-                    # record trade
-                    trades.append({'side':'sell','price':price})
-                    
+            if position == 0 and price > signal_up[i]:
+                position = 1
+                trades.append({
+                    'side': 'buy',
+                    'price': price,
+                    'index': df.index[i],
+                    'entry_capital': capital
+                })
+            elif position == 1 and price < signal_down[i]:
+                position = 0
+                trades.append({
+                    'side': 'sell',
+                    'price': price,
+                    'index': df.index[i],
+                    'exit_capital': capital
+                })
+
         elif mode == 'long_short':
-            if position <= 0:
-                # we are short or flat
-                if price > trender_down[i]:
-                    # go long
+            if price > signal_up[i]:
+                if position != 1:
+                    if position == -1:
+                        trades.append({
+                            'side': 'cover',
+                            'price': price,
+                            'index': df.index[i],
+                            'exit_capital': capital
+                        })
+                    trades.append({
+                        'side': 'buy',
+                        'price': price,
+                        'index': df.index[i],
+                        'entry_capital': capital
+                    })
                     position = 1
-                    trades.append({'side':'buy','price':price})
-            if position >= 0:
-                # we are long or flat
-                if price < trender_up[i]:
-                    # go short
+            elif price < signal_down[i]:
+                if position != -1:
+                    if position == 1:
+                        trades.append({
+                            'side': 'sell',
+                            'price': price,
+                            'index': df.index[i],
+                            'exit_capital': capital
+                        })
+                    trades.append({
+                        'side': 'short',
+                        'price': price,
+                        'index': df.index[i],
+                        'entry_capital': capital
+                    })
                     position = -1
-                    trades.append({'side':'short','price':price})
-        
-        # Update equity via daily mark-to-market
-        # We'll assume if position=1, our equity changes by daily % change from prev day
-        # If position=-1, we profit if price goes down
-        # This is a simplified model ignoring leverage constraints, etc.
-        
-        price_prev = closes[i-1]
-        daily_ret = (price - price_prev) / price_prev
-        
+
+        daily_ret = (price - closes[i - 1]) / closes[i - 1]
         if position == 1:
             capital *= (1 + daily_ret)
         elif position == -1:
             capital *= (1 - daily_ret)
-        
+
         equity_curve[i] = capital
-    
-    # Compute performance metrics
-    # 1) final return
+        positions[i] = position
+
     total_return = (equity_curve[-1] / equity_curve[0]) - 1.0
-    # 2) daily returns from equity curve
-    eq_daily_ret = pd.Series(np.diff(equity_curve)/equity_curve[:-1])
+    eq_daily_ret = pd.Series(np.diff(equity_curve) / equity_curve[:-1], index=df.index[1:])
     mean_daily_ret = eq_daily_ret.mean()
     std_daily_ret = eq_daily_ret.std()
+
     annual_vol = std_daily_ret * np.sqrt(annual_factor)
-    annual_return = (1 + mean_daily_ret)**annual_factor - 1
-    # Sharpe
-    if annual_vol != 0:
-        sharpe_ratio = (annual_return - 0.0) / annual_vol  # risk-free ~0
+    if not np.isnan(mean_daily_ret):
+        annual_return = (1 + mean_daily_ret)**annual_factor - 1
     else:
-        sharpe_ratio = np.nan
-    
-    # Max drawdown & duration
-    # Running peak
+        annual_return = np.nan
+
+    sharpe_ratio = (annual_return / annual_vol) if annual_vol != 0 else np.nan
+
     running_max = np.maximum.accumulate(equity_curve)
     drawdowns = (equity_curve - running_max) / running_max
     max_dd = drawdowns.min()
-    max_dd_idx = drawdowns.argmin()
-    
-    # max drawdown duration: length from previous peak to recovery
-    # quick method: track from point of the drawdown until equity re-hits that peak
+
     dd_durations = []
     peak_idx = 0
     for i in range(1, n):
-        if equity_curve[i] > running_max[i-1]:
-            # reset peak
+        if equity_curve[i] >= running_max[i - 1]:
             peak_idx = i
         dd_durations.append(i - peak_idx)
     max_dd_duration = max(dd_durations) if dd_durations else 0
-    
-    # number of trades
-    num_trades = len(trades)
-    # win ratio
-    # We'll treat each pair (buy->sell) or (short->cover) as one trade
-    # For simplicity, we approximate:
+
     realized_pnl = []
-    pos_side = None
-    entry_price = None
+    open_trade = None
+
     for trd in trades:
-        if trd['side'] in ['buy','short']:
-            pos_side = trd['side']
-            entry_price = trd['price']
-        elif trd['side'] == 'sell' and pos_side=='buy':
-            # close a long
-            exit_price = trd['price']
-            realized_pnl.append(exit_price - entry_price)
-            pos_side = None
-        elif trd['side'] == 'short' and pos_side=='short':
-            # short again? This logic can get complicated for "long_short"
-            pass
-        elif trd['side'] == 'short' and pos_side=='buy':
-            # reversing from long to short
-            exit_price = trd['price']
-            realized_pnl.append(exit_price - entry_price)
-            pos_side = 'short'
-            entry_price = exit_price
-        elif trd['side'] in ['sell'] and pos_side=='short':
-            # close short
-            exit_price = trd['price']
-            realized_pnl.append(entry_price - exit_price)
-            pos_side = None
-    
-    if len(realized_pnl) > 0:
-        wins = sum([1 for x in realized_pnl if x>0])
-        losses = sum([1 for x in realized_pnl if x<=0])
-        win_ratio = wins / (wins+losses)
+        side = trd['side']
+
+
+        if side in ['buy', 'short']:
+            open_trade = trd
+
+        elif side in ['sell', 'cover'] and open_trade is not None:
+
+            if (open_trade['side'] == 'buy' and side == 'sell') or \
+               (open_trade['side'] == 'short' and side == 'cover'):
+                entry_cap = open_trade.get('entry_capital', np.nan)
+                exit_cap = trd.get('exit_capital', np.nan)
+                pnl = exit_cap - entry_cap
+            else:
+                pnl = 0.0
+
+            realized_pnl.append(pnl)
+            open_trade = None
+
+
+    if realized_pnl:
+        wins = sum(1 for pnl in realized_pnl if pnl > 0)
+        losses = sum(1 for pnl in realized_pnl if pnl <= 0)
+        win_ratio = wins / (wins + losses) if (wins + losses) else np.nan
     else:
         win_ratio = np.nan
-    
+
+    num_trades = len(realized_pnl)
+
     results = {
         'final_equity': equity_curve[-1],
         'total_return': total_return,
         'annual_return': annual_return,
         'annual_vol': annual_vol,
         'sharpe_ratio': sharpe_ratio,
-        'max_drawdown': max_dd,  # typically negative
+        'max_drawdown': max_dd,
         'max_drawdown_duration': max_dd_duration,
         'num_trades': num_trades,
         'win_ratio': win_ratio
     }
-    
-    return results, pd.Series(equity_curve, index=df.index)
+
+    return (
+        results,
+        pd.Series(equity_curve, index=df.index, name='Equity'),
+        pd.Series(positions, index=df.index, name='Position')
+    )
+
+
 
 def apply_trender_to_simulations(simulated_prices, sensitivity=1):
     """
@@ -903,16 +901,18 @@ def backtest_trender_multiple_paths(simulated_prices, trender_results, mode='lon
     """
     performance_metrics = []
     equity_curves = {}
+    positions = {}
 
     for sim_id in simulated_prices.keys():
         df = simulated_prices[sim_id].copy()
-        df[['TrenderUp', 'TrenderDown', 'Trend']] = trender_results[sim_id]
+        df[['TrenderUp', 'TrenderDown', 'Trend']] = trender_results[sim_id][['TrenderUp', 'TrenderDown', 'Trend']]
 
         # Backtest strategy
-        results, equity_curve = backtest_trender_strategy(df, initial_capital, mode)
+        results, equity_curve, position = backtest_trender_strategy(df, initial_capital, mode)
         
         performance_metrics.append(results)
         equity_curves[sim_id] = equity_curve
+        positions[sim_id] = position
 
     # Convert results into a DataFrame
     df_results = pd.DataFrame(performance_metrics)
@@ -925,7 +925,7 @@ def backtest_trender_multiple_paths(simulated_prices, trender_results, mode='lon
         "max": df_results.max(),
     }
 
-    return aggregated_results, df_results, equity_curves
+    return aggregated_results, df_results, equity_curves, positions
 
 def select_best_model(backtest_results):
     """
@@ -948,3 +948,98 @@ def select_best_model(backtest_results):
         best_model = ranked_models.index[3]  # Prefer Bates
 
     return best_model
+def backtest_buy_and_hold_strategy(
+    df, 
+    initial_capital=100000.0, 
+    annual_factor=252
+):
+    import numpy as np
+    import pandas as pd
+
+    closes = df['Close'].values
+    n = len(df)
+
+    capital = initial_capital
+    equity_curve = np.zeros(n)
+    equity_curve[0] = capital
+
+    # Fully invested, so just compound each day
+    for i in range(1, n):
+        daily_ret = (closes[i] - closes[i - 1]) / closes[i - 1]
+        capital *= (1 + daily_ret)
+        equity_curve[i] = capital
+
+    # -- Performance metrics (same logic) --
+    total_return = (equity_curve[-1] / equity_curve[0]) - 1.0
+    eq_daily_ret = pd.Series(np.diff(equity_curve) / equity_curve[:-1], index=df.index[1:])
+    mean_daily_ret = eq_daily_ret.mean()
+    std_daily_ret = eq_daily_ret.std()
+
+    annual_vol = std_daily_ret * np.sqrt(annual_factor)
+    if not np.isnan(mean_daily_ret):
+        annual_return = (1 + mean_daily_ret)**annual_factor - 1
+    else:
+        annual_return = np.nan
+
+    sharpe_ratio = (annual_return / annual_vol) if annual_vol != 0 else np.nan
+
+    running_max = np.maximum.accumulate(equity_curve)
+    drawdowns = (equity_curve - running_max) / running_max
+    max_dd = drawdowns.min()
+
+    # max drawdown duration
+    dd_durations = []
+    peak_idx = 0
+    for i in range(1, n):
+        if equity_curve[i] >= running_max[i - 1]:
+            peak_idx = i
+        dd_durations.append(i - peak_idx)
+    max_dd_duration = max(dd_durations) if dd_durations else 0
+
+    results = {
+        'final_equity': equity_curve[-1],
+        'total_return': total_return,
+        'annual_return': annual_return,
+        'annual_vol': annual_vol,
+        'sharpe_ratio': sharpe_ratio,
+        'max_drawdown': max_dd,
+        'max_drawdown_duration': max_dd_duration,
+        # For consistency with your existing columns:
+        'num_trades': 1,
+        'win_ratio': np.nan,  # not really applicable to buy-and-hold
+    }
+
+    return (
+        results,
+        pd.Series(equity_curve, index=df.index, name='Equity')
+    )
+def backtest_buy_and_hold_multiple_paths(
+    simulated_prices,
+    initial_capital=100000.0
+):
+    import pandas as pd
+
+    performance_metrics = []
+    equity_curves = {}
+
+    for sim_id, df_sim in simulated_prices.items():
+        # Single-path buy & hold backtest
+        results, eq_curve = backtest_buy_and_hold_strategy(
+            df_sim, 
+            initial_capital=initial_capital
+        )
+        performance_metrics.append(results)
+        equity_curves[sim_id] = eq_curve
+
+    # Convert results into a DataFrame
+    df_results = pd.DataFrame(performance_metrics)
+
+    # Just like your "aggregated_results" approach
+    aggregated_results = {
+        "mean": df_results.mean(),
+        "std":  df_results.std(),
+        "min":  df_results.min(),
+        "max":  df_results.max(),
+    }
+
+    return aggregated_results, df_results, equity_curves
