@@ -86,13 +86,18 @@ def calibrate_heston(df):
     v_next = v_next.loc[v_curr.index.intersection(v_next.index)]
     
     y = v_next - v_curr
-    X = -v_curr  
+    X = -v_curr
     X = sm.add_constant(X)
     model = sm.OLS(y, X, missing='drop').fit()
-    alpha, beta = model.params[0], model.params[1]
+    try:
+        alpha, beta = model.params['const'], model.params['Close']
+    except:
+        alpha, beta = model.params[0], model.params[1]
     
-    kappa_est = max(-beta, 1e-3)
+    # Ensure positive values
+    kappa_est = max(beta, 1e-4)
     theta_est = max(alpha / kappa_est, 1e-8)  # Ensure non-negative theta
+
 
     res = model.resid
     valid_mask = (v_curr > 0)
