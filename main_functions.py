@@ -54,7 +54,6 @@ def calibrate_jump_diffusion(df, jump_threshold=3.0):
         nu = 0.0
         delta = 0.0
     
-    # Continuous part (excluding jump days)
     non_jumps = log_returns.drop(jump_indices)
     mu_cont = non_jumps.mean()
     sigma_cont = non_jumps.std()
@@ -81,31 +80,26 @@ def calibrate_heston(df):
     
     mu_est = log_rets.mean()
     
-    # Proxy for variance: v_t = (log_rets)^2
     v = log_rets**2
     v_next = v.shift(-1).dropna()
     v_curr = v.dropna()
     v_next = v_next.loc[v_curr.index.intersection(v_next.index)]
     
-    # Kappa-theta estimation using OLS
     y = v_next - v_curr
     X = -v_curr  
     X = sm.add_constant(X)
     model = sm.OLS(y, X, missing='drop').fit()
     alpha, beta = model.params[0], model.params[1]
     
-    # Ensure positive values
     kappa_est = max(-beta, 1e-3)
     theta_est = max(alpha / kappa_est, 1e-8)  # Ensure non-negative theta
 
-    # Estimate sigma_v from residual approach
     res = model.resid
     valid_mask = (v_curr > 0)
     numerator = (res[valid_mask]**2).sum()
     denominator = v_curr[valid_mask].sum()
     sigma_v_est = np.sqrt(numerator / denominator) if denominator > 0 else 0.01
     
-    # Rough correlation estimate between dW1 and dW2
     dW1 = log_rets / np.sqrt(v)
     dW2 = res / (sigma_v_est * np.sqrt(v))
     common_index = dW1.dropna().index.intersection(dW2.dropna().index)
@@ -133,7 +127,6 @@ def calibrate_bates(df):
     heston_params = calibrate_heston(df)
     jd_params = calibrate_jump_diffusion(df, jump_threshold=3.0)
     
-    # Ensure lambda is meaningful
     lam = jd_params['lambda']
     if lam < 1e-4:  # If lambda is too small, ignore jumps
         lam = 0.0
@@ -157,7 +150,6 @@ def calibrate_bates(df):
     
     return bates_params
 
-###############################################################################
 
 
 def simulate_gbm(params, S0, n_days, dt=1/252, seed=42):
@@ -412,9 +404,6 @@ def simulate_bates_paths(params, S0, n_days, n_sims = 1, dt=1/252, seed=42):
 
 
 
-###############################################################################
-#    PART 3: BACKTEST THE ACCURACY OF HISTORICAL FIT (SIMPLE K-S COMPARISON)
-###############################################################################
 def backtest_historical_fit(df, simulated_prices):
     """
     Compare the distribution of historical log returns vs. simulated log returns 
@@ -457,9 +446,6 @@ def backtest_historical_fit_paths(df, simulated_prices_matrix):
     return ks_stat, ks_pvalue
 
 
-###############################################################################
-#     PART 4: BROWNIAN BRIDGE TO GET DAILY HIGH/LOW FROM SIMULATED CLOSES
-###############################################################################
 def estimate_intraday_sigma(params, model_type="GBM", steps_per_day=24):
     """
     Estimate intraday volatility sigma for the Brownian Bridge based on model parameters.
@@ -517,19 +503,16 @@ def brownian_bridge_daily(sim_closes, steps_per_day=24, seed=42):
         open_price = sim_closes[i]
         close_price = sim_closes[i+1]
         
-        # We'll create steps_per_day - 1 intraday points bridging
         path = np.zeros(steps_per_day+1)
         path[0] = open_price
         path[steps_per_day] = close_price
         
         for step in range(1, steps_per_day):
-            # naive approach
-            # linear interpolation as the drift of the "bridge"
+
             fraction = step / steps_per_day
             drift = path[step-1] + (close_price - path[step-1]) / (steps_per_day - step + 1)
             
-            # random shock scaled by some fraction
-            scale = 0.01 * path[step-1]  # can be tuned or linked to volatility
+            scale = 0.01 * path[step-1]  
             path[step] = drift + np.random.normal(0, scale)
         
         day_high = path.max()
@@ -563,7 +546,6 @@ def brownian_bridge_paths(sim_closes_matrix, steps_per_day=24, sigma_intraday=0.
     
     n_days, n_sims = sim_closes_matrix.shape[0] - 1, sim_closes_matrix.shape[1]
     
-    # Store DataFrames for each simulation separately
     sim_dataframes = {}
 
     for sim in range(n_sims):
@@ -577,20 +559,16 @@ def brownian_bridge_paths(sim_closes_matrix, steps_per_day=24, sigma_intraday=0.
             open_day = open_prices[i]
             close_day = close_prices[i]
             
-            # Generate time grid for intraday steps
             t = np.linspace(0, 1, steps_per_day+1)
             
-            # Brownian bridge formula: drift + volatility term
             drift = (1 - t) * open_day + t * close_day
             volatility = sigma_intraday * np.sqrt(t * (1 - t)) * np.random.randn(steps_per_day+1)
 
             bridge_path = drift + volatility
             
-            # Store intraday high/low for the day
             high_prices[i] = bridge_path.max()
             low_prices[i] = bridge_path.min()
 
-        # Create a DataFrame for this simulation
         df_bridge = pd.DataFrame({
             'Open': open_prices,
             'High': high_prices,
@@ -598,14 +576,11 @@ def brownian_bridge_paths(sim_closes_matrix, steps_per_day=24, sigma_intraday=0.
             'Close': close_prices
         })
         
-        sim_dataframes[sim] = df_bridge  # Store each simulation separately
+        sim_dataframes[sim] = df_bridge 
     
     return sim_dataframes
 
 
-###############################################################################
-#  PART 5: BACKTEST TRADER USING TRENDER COLUMNS
-###############################################################################
 
 def ewm_std(series, span):
     ewm_mean   = series.ewm(span=span, adjust=False).mean()
@@ -642,7 +617,6 @@ def trender_bloomberg_style(df, period=14, sensitivity=1, use_close=True):
     down_line = np.full(n, np.nan)
     trend     = np.full(n, 0, dtype=int)
 
-    # Pick an initial day where stdev is not NaN:
     first_valid = sd_ema_tr.first_valid_index()
     if first_valid is None:
         return pd.DataFrame(
@@ -914,10 +888,8 @@ def backtest_trender_multiple_paths(simulated_prices, trender_results, mode='lon
         equity_curves[sim_id] = equity_curve
         positions[sim_id] = position
 
-    # Convert results into a DataFrame
     df_results = pd.DataFrame(performance_metrics)
 
-    # Aggregate results
     aggregated_results = {
         "mean": df_results.mean(),
         "std": df_results.std(),
@@ -933,19 +905,16 @@ def select_best_model(backtest_results):
     If all p-values are 0, selects the model with the lowest KS-stat.
     Prefers more complex models (Bates > Heston > Jump-Diffusion > GBM).
     """
-    # Sort models by KS statistic (lower is better)
     ranked_models = backtest_results.T.sort_values(by="KS_Stat")
     
-    # Select the model with the lowest KS-Stat
     best_model = ranked_models.index[0]
     
-    # Ensure we prioritize more advanced models if KS stats are close
     if best_model == "GBM" and ranked_models.iloc[1]["KS_Stat"] < ranked_models.iloc[0]["KS_Stat"] * 1.05:
-        best_model = ranked_models.index[1]  # Prefer Jump-Diffusion
+        best_model = ranked_models.index[1]  
     if best_model in ["GBM", "Jump-Diffusion"] and ranked_models.iloc[2]["KS_Stat"] < ranked_models.iloc[0]["KS_Stat"] * 1.05:
-        best_model = ranked_models.index[2]  # Prefer Heston
+        best_model = ranked_models.index[2] 
     if best_model in ["GBM", "Jump-Diffusion", "Heston"] and ranked_models.iloc[3]["KS_Stat"] < ranked_models.iloc[0]["KS_Stat"] * 1.05:
-        best_model = ranked_models.index[3]  # Prefer Bates
+        best_model = ranked_models.index[3]  
 
     return best_model
 def backtest_buy_and_hold_strategy(
@@ -963,13 +932,11 @@ def backtest_buy_and_hold_strategy(
     equity_curve = np.zeros(n)
     equity_curve[0] = capital
 
-    # Fully invested, so just compound each day
     for i in range(1, n):
         daily_ret = (closes[i] - closes[i - 1]) / closes[i - 1]
         capital *= (1 + daily_ret)
         equity_curve[i] = capital
 
-    # -- Performance metrics (same logic) --
     total_return = (equity_curve[-1] / equity_curve[0]) - 1.0
     eq_daily_ret = pd.Series(np.diff(equity_curve) / equity_curve[:-1], index=df.index[1:])
     mean_daily_ret = eq_daily_ret.mean()
@@ -987,7 +954,6 @@ def backtest_buy_and_hold_strategy(
     drawdowns = (equity_curve - running_max) / running_max
     max_dd = drawdowns.min()
 
-    # max drawdown duration
     dd_durations = []
     peak_idx = 0
     for i in range(1, n):
@@ -1004,9 +970,8 @@ def backtest_buy_and_hold_strategy(
         'sharpe_ratio': sharpe_ratio,
         'max_drawdown': max_dd,
         'max_drawdown_duration': max_dd_duration,
-        # For consistency with your existing columns:
         'num_trades': 1,
-        'win_ratio': np.nan,  # not really applicable to buy-and-hold
+        'win_ratio': np.nan,  
     }
 
     return (
@@ -1023,7 +988,6 @@ def backtest_buy_and_hold_multiple_paths(
     equity_curves = {}
 
     for sim_id, df_sim in simulated_prices.items():
-        # Single-path buy & hold backtest
         results, eq_curve = backtest_buy_and_hold_strategy(
             df_sim, 
             initial_capital=initial_capital
@@ -1031,10 +995,8 @@ def backtest_buy_and_hold_multiple_paths(
         performance_metrics.append(results)
         equity_curves[sim_id] = eq_curve
 
-    # Convert results into a DataFrame
     df_results = pd.DataFrame(performance_metrics)
 
-    # Just like your "aggregated_results" approach
     aggregated_results = {
         "mean": df_results.mean(),
         "std":  df_results.std(),
