@@ -864,7 +864,7 @@ def apply_trender_to_simulations(simulated_prices, sensitivity=1):
     
     return trender_results
 
-def backtest_trender_multiple_paths(simulated_prices, trender_results, mode='long_only', initial_capital=100000.0):
+def backtest_trender_multiple_paths(simulated_prices, trender_results, mode='long_only', initial_capital=100000.0, annual_factor=252):
     """
     Backtest the Trender strategy across multiple simulated price paths.
     
@@ -887,7 +887,7 @@ def backtest_trender_multiple_paths(simulated_prices, trender_results, mode='lon
         df[['TrenderUp', 'TrenderDown', 'Trend']] = trender_results[sim_id][['TrenderUp', 'TrenderDown', 'Trend']]
 
         # Backtest strategy
-        results, equity_curve, position = backtest_trender_strategy(df, initial_capital, mode)
+        results, equity_curve, position = backtest_trender_strategy(df = df, initial_capital = initial_capital, mode = mode, annual_factor = annual_factor)
         
         performance_metrics.append(results)
         equity_curves[sim_id] = equity_curve
@@ -985,7 +985,8 @@ def backtest_buy_and_hold_strategy(
     )
 def backtest_buy_and_hold_multiple_paths(
     simulated_prices,
-    initial_capital=100000.0
+    initial_capital=100000.0, 
+    annual_factor = 252
 ):
     import pandas as pd
 
@@ -995,7 +996,8 @@ def backtest_buy_and_hold_multiple_paths(
     for sim_id, df_sim in simulated_prices.items():
         results, eq_curve = backtest_buy_and_hold_strategy(
             df_sim, 
-            initial_capital=initial_capital
+            initial_capital=initial_capital,
+            annual_factor = annual_factor
         )
         performance_metrics.append(results)
         equity_curves[sim_id] = eq_curve
